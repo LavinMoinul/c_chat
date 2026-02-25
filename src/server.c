@@ -1,6 +1,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +16,22 @@ static int parse_port(const char *s) {
     return (int)val;
 }
 
+static int send_all(int fd, const char *buf, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = send(fd, buf + sent, len - sent, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        sent += (size_t)n;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    signal(SIGPIPE, SIG_IGN);
+
     if (argc != 2) {
         fprintf(stderr, "usage: %s <port>\n", argv[0]);
         return 1;
@@ -59,7 +75,7 @@ int main(int argc, char **argv) {
     }
 
     printf("server listening on port %d\n", port);
-    printf("test: nc 127.0.0.1 %d\n", port);
+    printf("test client: nc 127.0.0.1 %d\n", port);
 
     while (1) {
         struct sockaddr_in client_addr;
@@ -76,9 +92,35 @@ int main(int argc, char **argv) {
         const char *ip_str = inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
         if (!ip_str) ip_str = "unknown";
 
-        printf("client connected from %s:%d\n", ip_str, ntohs(client_addr.sin_port));
+        int client_port = ntohs(client_addr.sin_port);
+        printf("client connected from %s:%d\n", ip_str, client_port);
+        printf("waiting for messages\n");
+
+        char buf[1024];
+
+        while (1) {
+            ssize_t n = recv(client_fd, buf, sizeof(buf) - 1, 0);
+            if (n == 0) {
+                printf("client disconnected %s:%d\n", ip_str, client_port);
+                break;
+            }
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                perror("recv");
+                break;
+            }
+
+            buf[n] = '\0';
+            printf("recv %zd bytes: %s", n, buf);
+
+            if (send_all(client_fd, buf, (size_t)n) < 0) {
+                perror("send");
+                break;
+            }
+        }
 
         close(client_fd);
+        printf("ready for next client\n");
     }
 
     close(listen_fd);
