@@ -5,8 +5,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#define MAX_CLIENTS 64
+#define BUF_SIZE 1024
+#define OUT_SIZE 1600
 
 static int parse_port(const char *s) {
     char *end = NULL;
@@ -27,6 +32,26 @@ static int send_all(int fd, const char *buf, size_t len) {
         sent += (size_t)n;
     }
     return 0;
+}
+
+static void addr_to_str(const struct sockaddr_in *a, char *ip_out, size_t ip_out_sz, int *port_out) {
+    const char *s = inet_ntop(AF_INET, &a->sin_addr, ip_out, ip_out_sz);
+    if (!s) strncpy(ip_out, "unknown", ip_out_sz);
+    ip_out[ip_out_sz - 1] = '\0';
+    *port_out = ntohs(a->sin_port);
+}
+
+static int find_free_slot(int fds[]) {
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (fds[i] == -1) return i;
+    }
+    return -1;
+}
+
+static void drop_client(int idx, int fds[], struct sockaddr_in addrs[]) {
+    if (fds[idx] != -1) close(fds[idx]);
+    fds[idx] = -1;
+    memset(&addrs[idx], 0, sizeof(addrs[idx]));
 }
 
 int main(int argc, char **argv) {
@@ -56,13 +81,13 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons((uint16_t)port);
+    struct sockaddr_in srv;
+    memset(&srv, 0, sizeof(srv));
+    srv.sin_family = AF_INET;
+    srv.sin_addr.s_addr = htonl(INADDR_ANY);
+    srv.sin_port = htons((uint16_t)port);
 
-    if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    if (bind(listen_fd, (struct sockaddr *)&srv, sizeof(srv)) < 0) {
         perror("bind");
         close(listen_fd);
         return 1;
@@ -74,55 +99,113 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    int client_fds[MAX_CLIENTS];
+    struct sockaddr_in client_addrs[MAX_CLIENTS];
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        client_fds[i] = -1;
+        memset(&client_addrs[i], 0, sizeof(client_addrs[i]));
+    }
+
     printf("server listening on port %d\n", port);
-    printf("test client: nc 127.0.0.1 %d\n", port);
+    printf("connect with: nc 127.0.0.1 %d\n", port);
 
     while (1) {
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
+        fd_set readfds;
+        FD_ZERO(&readfds);
 
-        int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
-        if (client_fd < 0) {
+        FD_SET(listen_fd, &readfds);
+        int maxfd = listen_fd;
+
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (client_fds[i] != -1) {
+                FD_SET(client_fds[i], &readfds);
+                if (client_fds[i] > maxfd) maxfd = client_fds[i];
+            }
+        }
+
+        int ready = select(maxfd + 1, &readfds, NULL, NULL, NULL);
+        if (ready < 0) {
             if (errno == EINTR) continue;
-            perror("accept");
+            perror("select");
             break;
         }
 
-        char ip[INET_ADDRSTRLEN];
-        const char *ip_str = inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
-        if (!ip_str) ip_str = "unknown";
+        if (FD_ISSET(listen_fd, &readfds)) {
+            struct sockaddr_in caddr;
+            socklen_t clen = sizeof(caddr);
+            int cfd = accept(listen_fd, (struct sockaddr *)&caddr, &clen);
 
-        int client_port = ntohs(client_addr.sin_port);
-        printf("client connected from %s:%d\n", ip_str, client_port);
-        printf("waiting for messages\n");
+            if (cfd < 0) {
+                if (errno != EINTR) perror("accept");
+            } else {
+                int slot = find_free_slot(client_fds);
+                if (slot == -1) {
+                    const char *msg = "server full\n";
+                    send_all(cfd, msg, strlen(msg));
+                    close(cfd);
+                    printf("rejected client, server full\n");
+                } else {
+                    client_fds[slot] = cfd;
+                    client_addrs[slot] = caddr;
 
-        char buf[1024];
+                    char ip[INET_ADDRSTRLEN];
+                    int cport = 0;
+                    addr_to_str(&caddr, ip, sizeof(ip), &cport);
+                    printf("client connected %s:%d (slot %d)\n", ip, cport, slot);
 
-        while (1) {
-            ssize_t n = recv(client_fd, buf, sizeof(buf) - 1, 0);
-            if (n == 0) {
-                printf("client disconnected %s:%d\n", ip_str, client_port);
-                break;
-            }
-            if (n < 0) {
-                if (errno == EINTR) continue;
-                perror("recv");
-                break;
-            }
-
-            buf[n] = '\0';
-            printf("recv %zd bytes: %s", n, buf);
-
-            if (send_all(client_fd, buf, (size_t)n) < 0) {
-                perror("send");
-                break;
+                    const char *welcome = "connected. type messages and press enter\n";
+                    send_all(cfd, welcome, strlen(welcome));
+                }
             }
         }
 
-        close(client_fd);
-        printf("ready for next client\n");
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            int cfd = client_fds[i];
+            if (cfd == -1) continue;
+            if (!FD_ISSET(cfd, &readfds)) continue;
+
+            char buf[BUF_SIZE];
+            ssize_t n = recv(cfd, buf, sizeof(buf), 0);
+
+            if (n == 0) {
+                char ip[INET_ADDRSTRLEN];
+                int cport = 0;
+                addr_to_str(&client_addrs[i], ip, sizeof(ip), &cport);
+                printf("client disconnected %s:%d (slot %d)\n", ip, cport, i);
+                drop_client(i, client_fds, client_addrs);
+                continue;
+            }
+
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                perror("recv");
+                drop_client(i, client_fds, client_addrs);
+                continue;
+            }
+
+            char ip[INET_ADDRSTRLEN];
+            int cport = 0;
+            addr_to_str(&client_addrs[i], ip, sizeof(ip), &cport);
+
+            char out[OUT_SIZE];
+            int out_len = snprintf(out, sizeof(out), "[%s:%d] %.*s", ip, cport, (int)n, buf);
+            if (out_len < 0) continue;
+            if (out_len > (int)sizeof(out)) out_len = (int)sizeof(out);
+
+            printf("message from %s:%d (slot %d)\n", ip, cport, i);
+
+            for (int j = 0; j < MAX_CLIENTS; j++) {
+                if (client_fds[j] == -1) continue;
+                if (send_all(client_fds[j], out, (size_t)out_len) < 0) {
+                    perror("send");
+                }
+            }
+        }
     }
 
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (client_fds[i] != -1) close(client_fds[i]);
+    }
     close(listen_fd);
     return 0;
 }
