@@ -35,3 +35,8 @@ buffer: memory region used to store bytes
 bytes: raw data sent over the network  
 recv(): read bytes into a buffer  
 send(): write bytes from a buffer
+
+newline framing: treating each line ending with enter as one full message
+handshake: an initial exchange before normal chat starts, here used to set the username
+buffering: temporarily storing incoming bytes until a full line is ready
+memmove: moves bytes in memory, used here to remove a processed line from the input buffer
