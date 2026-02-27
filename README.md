@@ -14,3 +14,4 @@ day 1: server binds, listens, accepts, logs connections
 day 2: server keeps connection open, recv messages, echoes back to client
  
 day 3: server handles multiple clients at once with select and broadcasts messages
+day 4: server buffers per-client input by newline, assigns usernames, and broadcasts join/leave events
