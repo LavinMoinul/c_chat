@@ -22,7 +22,9 @@ To test multiple clients, open more than one terminal and connect with `nc` in e
 - Per-client input buffering with newline-based message framing
 - Username handshake on connect
 - Join and leave announcements
+- Slash commands for `/help`, `/users`, `/nick`, and `/quit`
 - Fixed-size buffers with no dynamic allocation
+- Protocol documentation and a small parser test
 
 ## Milestones
 Day 1: Server binds, listens, accepts connections, and logs clients.
@@ -33,6 +35,8 @@ Day 3: Server handles multiple clients with `select` and broadcasts messages to 
 
 Day 4: Server buffers input by newline, assigns usernames, and announces join and leave events.
 
+Day 5: Server adds slash commands, protocol documentation, a parser test, and improved Makefile targets.
+
 ## Learning Goals
 This project is focused on building confidence with:
 - C programming fundamentals
@@ -42,7 +46,6 @@ This project is focused on building confidence with:
 - Incremental development with Git and GitHub
 
 ## Next Steps
-- Add slash commands such as `/users`, `/quit`, and `/nick`
-- Document the chat protocol in `docs/protocol.md`
-- Add a small parser test program with `assert`
-- Expand the Makefile with `run`, `test`, and `sanitize` targets
+- Add cleaner message parsing tests
+- Improve disconnect and overflow edge-case handling
+- Build a dedicated client program instead of relying on `nc`
